@@ -9,15 +9,13 @@
 //http://www.at91.com/viewtopic.php?t=22990
 
 #include "sam.h"
-#include "FatFS/ff.h"
-#include "FatFS/diskio.h"
 #include "HSMCI.h"
 #include "XDMAC.h"
 #include "sd_mmc_protocol.h"
 
 #include <stdio.h>
 
-#define PRINT_CARD_INFO
+#define PRINT_CARD_DEBUG
 
 void HSMCI_Init(void);
 void HSMCI_sendClock(void);
@@ -50,8 +48,6 @@ struct {
 
 
 //variables used between functions for transfers
-static uint16_t sd_mmc_nb_block_to_tranfer = 0;
-static uint16_t sd_mmc_nb_block_remaining = 0;
 static uint32_t hsmci_transferPos;
 static uint16_t hsmci_blocksize, hsmci_numBlocks;
 
@@ -384,7 +380,7 @@ uint8_t SD_CardInit(void)
 	\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 	**************************************************************** */
 
-#ifdef PRINT_CARD_INFO	
+#ifdef PRINT_CARD_DEBUG
 	//print card info
 	printf("Card info\r\n");
 	
@@ -448,6 +444,7 @@ uint32_t HSMCI_WaitEndBlockTransfer(void)
 	} else return 1;
 }
 
+//start data transfer command
 void HSMCI_adtc_start(uint32_t cmd, uint32_t arg, uint16_t blocksize, uint16_t num_blocks, uint8_t use_DMA)
 {
 	uint32_t cmdr;
@@ -481,8 +478,7 @@ void HSMCI_adtc_start(uint32_t cmd, uint32_t arg, uint16_t blocksize, uint16_t n
 		// Value 0 corresponds to a 512-byte transfer
 		HSMCI->HSMCI_BLKR = ((blocksize % 512) << HSMCI_BLKR_BCNT_Pos);
 		} else {
-		HSMCI->HSMCI_BLKR = (blocksize << HSMCI_BLKR_BLKLEN_Pos) |
-		(num_blocks << HSMCI_BLKR_BCNT_Pos);
+		HSMCI->HSMCI_BLKR = (blocksize << HSMCI_BLKR_BLKLEN_Pos) |	(num_blocks << HSMCI_BLKR_BCNT_Pos);
 		if (cmd & SDMMC_CMD_SDIO_BLOCK) {
 			cmdr |= HSMCI_CMDR_TRTYP_BLOCK;
 		} else if (cmd & SDMMC_CMD_STREAM) {
@@ -494,7 +490,7 @@ void HSMCI_adtc_start(uint32_t cmd, uint32_t arg, uint16_t blocksize, uint16_t n
 		}
 	}
 	
-	hsmci_transferPos = 0;
+	hsmci_transferPos = 0;			//reset transferpos
 	hsmci_blocksize = blocksize;
 	hsmci_numBlocks = num_blocks;
 	
@@ -504,7 +500,7 @@ void HSMCI_adtc_start(uint32_t cmd, uint32_t arg, uint16_t blocksize, uint16_t n
 
 void HSMCI_readBlocks(void *dest, uint16_t num_blocks)
 {
-	uint32_t datasize = num_blocks * HSMCI_SD_BLOCKSZ;
+	uint32_t datasize = num_blocks * hsmci_blocksize;
 	
 	XDMAC -> XDMAC_GD = (XDMAC_GD_DI0 << HSMCI_XDMAC_CH);	//disable DMA channel
 	XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CBC = XDMAC_CBC_BLEN(0);
@@ -539,20 +535,22 @@ void HSMCI_readBlocks(void *dest, uint16_t num_blocks)
 														| XDMAC_CC_SAM_FIXED_AM
 														| XDMAC_CC_DAM_INCREMENTED_AM
 														| XDMAC_CC_PERID(0);
-		}
+	}
 		
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CSA = (uint32_t)&(HSMCI->HSMCI_FIFO[0]);
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CDA = (uint32_t)dest;	
+	XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CSA = (uint32_t)&(HSMCI->HSMCI_FIFO[0]);
+	XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CDA = (uint32_t)dest;	
 	
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CIS;	//read interrupt reg to clear any flags prior to enabling channel
-		XDMAC -> XDMAC_GE = ( XDMAC_GE_EN0 << HSMCI_XDMAC_CH );
+	XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CIS;	//read interrupt reg to clear any flags prior to enabling channel
+	XDMAC -> XDMAC_GE = ( XDMAC_GE_EN0 << HSMCI_XDMAC_CH );
+
+	//block written increment counter
+	hsmci_transferPos += datasize;		
 		
-		hsmci_transferPos += datasize;
 }			
 
 void HSMCI_writeBlocks(void *src, uint16_t num_blocks)
 {
-	uint32_t datasize = num_blocks * HSMCI_SD_BLOCKSZ;
+	uint32_t datasize = num_blocks * hsmci_blocksize;
 	
 	XDMAC -> XDMAC_GD = (XDMAC_GD_DI0 << HSMCI_XDMAC_CH);	//disable DMA channel
 	XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CBC = XDMAC_CBC_BLEN(0);
@@ -595,10 +593,12 @@ void HSMCI_writeBlocks(void *src, uint16_t num_blocks)
 	XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CIS;	//read interrupt reg to clear any flags prior to enabling channel
 	XDMAC -> XDMAC_GE = ( XDMAC_GE_EN0 << HSMCI_XDMAC_CH );
 	
-	hsmci_transferPos += datasize;	
+	//block written increment counter
+	hsmci_transferPos += datasize;
+	
 }
 
-uint8_t SD_readBlocks(uint32_t *dst, uint16_t num_blocks, uint32_t startaddr)
+uint8_t SD_readBlocks(void *dst, uint16_t num_blocks, uint32_t startaddr)
 {
 	uint32_t cmd, arg;
 	uint32_t retry = 200000;
@@ -630,21 +630,21 @@ uint8_t SD_readBlocks(uint32_t *dst, uint16_t num_blocks, uint32_t startaddr)
 	HSMCI_adtc_start(cmd, arg, HSMCI_SD_BLOCKSZ, num_blocks, 1);
 	
 	//check for error code?
-		
-	for (uint32_t num_trans = 0; num_trans < num_blocks; num_trans++) {
-		HSMCI_readBlocks(dst, 1);
-		HSMCI_WaitEndBlockTransfer();
-	}
+	
+	HSMCI_readBlocks(dst, num_blocks);		
+	HSMCI_WaitEndBlockTransfer();
+
+	HSMCI_sendCommand(0, SDMMC_CMD12_STOP_TRANSMISSION, 0);
 	
 	return 1;
 }
 
-uint8_t SD_writeBlocks(uint32_t *src, uint16_t num_blocks, uint32_t startaddr)
+uint8_t SD_writeBlocks(void *src, uint16_t num_blocks, uint32_t startaddr)
 {
 	uint32_t cmd, arg;
 	uint32_t retry = 200000;
 
-	//wait for data ready
+	//wait for data ready status
 	do {
 		HSMCI_sendCommand(0, SDMMC_MCI_CMD13_SEND_STATUS, (uint32_t)sd_card_info.relative_addr << 16);
 		if (HSMCI_getResponse() & CARD_STATUS_READY_FOR_DATA) {
@@ -668,298 +668,42 @@ uint8_t SD_writeBlocks(uint32_t *src, uint16_t num_blocks, uint32_t startaddr)
 		arg = (startaddr * HSMCI_SD_BLOCKSZ);
 	}	
 	
-	HSMCI_adtc_start(cmd, arg, HSMCI_SD_BLOCKSZ, num_blocks, 1);
+	HSMCI_adtc_start(cmd, arg, HSMCI_SD_BLOCKSZ, num_blocks, 1);		//address counter is reset here
 	
 	//check for error code?
+
+	HSMCI_writeBlocks(src, num_blocks);
+	HSMCI_WaitEndBlockTransfer();
 	
-	for (uint32_t num_trans = 0; num_trans < num_blocks; num_trans++) {
-		HSMCI_writeBlocks(src, 1);
-		HSMCI_WaitEndBlockTransfer();
-	}	
-	
+	HSMCI_sendCommand(0, SDMMC_CMD12_STOP_TRANSMISSION, 0);
+
+
 	return 1;	
 }
 
-/*
-uint8_t HSMCI_readBlock(uint32_t *dest, uint32_t startaddr, uint16_t num_blocks, uint8_t DMAtransfer)	//NON-ASF version
+
+uint8_t HSMCI_RW_Test(void)
 {
-	uint32_t cmd = 0, timeout = 200000;
-	while ( (! ((HSMCI -> HSMCI_SR & HSMCI_SR_CMDRDY) && (HSMCI -> HSMCI_SR & HSMCI_SR_NOTBUSY))) && timeout ) {
-		timeout--;
+	uint32_t num_blocks_to_write = 4;
+	char blockwrite[HSMCI_SD_BLOCKSZ * num_blocks_to_write] , blockread[HSMCI_SD_BLOCKSZ * num_blocks_to_write];
+	
+	for (uint32_t i = 0; i < HSMCI_SD_BLOCKSZ * num_blocks_to_write; i++) {
+		blockwrite[i] = 0;
+		blockread[i] = 0;
 	}
 	
-	if (!timeout) {
-		return 0;
-	}
+	sprintf(blockwrite, "Hello world!!!\r\n");
+	sprintf(blockwrite + HSMCI_SD_BLOCKSZ, "joepraktischhoi\r\n");
+	sprintf(blockwrite + 2*HSMCI_SD_BLOCKSZ, "Heel praktisch\r\n");
+	sprintf(blockwrite + 3*HSMCI_SD_BLOCKSZ, "meautorbeaut\r\n");	
 	
-	// check if card is ready 
-	timeout = 200000;
-	do {
-		HSMCI_sendCommand(0, SDMMC_MCI_CMD13_SEND_STATUS, (uint32_t)(sd_card_info.relative_addr << 16));
-		if ((HSMCI_getResponse() & CARD_STATUS_READY_FOR_DATA)) {
-			break;
-		}
-		timeout--;
-	} while (timeout);
+	SD_writeBlocks(blockwrite, num_blocks_to_write, (312*512));	
+	SD_readBlocks(blockread, num_blocks_to_write, (312*512));
 	
-	
-	if (!timeout) {
-		return 0;
-	}
-	
-	// send SELECT / DESELECT_CARD command 
-	HSMCI_sendCommand(0, SDMMC_CMD7_SELECT_CARD_CMD, ((uint32_t)(sd_card_info.relative_addr << 16)));	//select card
-
-	// send SET_BLOCKLEN command 
-	HSMCI_sendCommand(0, SDMMC_CMD16_SET_BLOCKLEN, HSMCI_SD_BLOCKSZ);
-		
-	if (num_blocks > 1) {
-		cmd = SDMMC_CMD18_READ_MULTIPLE_BLOCK;
-	} else {
-		cmd = SDMMC_CMD17_READ_SINGLE_BLOCK;
-	}
-	
-	
-	if (DMAtransfer) {
-		HSMCI -> HSMCI_DMA = HSMCI_DMA_DMAEN;						// set the DMAEN bit
-		HSMCI -> HSMCI_BLKR = HSMCI_BLKR_BLKLEN(HSMCI_SD_BLOCKSZ);	//set the block length
-		HSMCI_adtc_start(cmd, startaddr, HSMCI_SD_BLOCKSZ, 1, 1);
-
-		// Configure DMA channel 
-		XDMAC -> XDMAC_GD = (XDMAC_GD_DI(HSMCI_XDMAC_CH));	//disable DMA channel
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CIS;		//read to clear ISR status
-		
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CUBC	= XDMAC_CUBC_UBLEN(HSMCI_SD_BLOCKSZ / 4);
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CC	= XDMAC_CC_TYPE_PER_TRAN
-														| XDMAC_CC_MBSIZE_SINGLE
-														| XDMAC_CC_DSYNC_PER2MEM
-														| XDMAC_CC_CSIZE_CHK_1
-														| XDMAC_CC_DWIDTH_WORD
-														| XDMAC_CC_SIF_AHB_IF1
-														| XDMAC_CC_DIF_AHB_IF0	
-														| XDMAC_CC_SAM_FIXED_AM
-														| XDMAC_CC_DAM_INCREMENTED_AM
-														| XDMAC_CC_PERID(0);
-		
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CSA = (uint32_t)&(HSMCI->HSMCI_FIFO[0]);
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CDA = (uint32_t)dest;
-		DMA_enableChannel(HSMCI_XDMAC_CH);
-		
-		while (!(HSMCI -> HSMCI_SR & HSMCI_SR_XFRDONE));		
-		
-	} else { //!DMAtransfer
-		HSMCI -> HSMCI_DMA &= ~HSMCI_DMA_DMAEN;						// reset the DMAEN bit
-		HSMCI -> HSMCI_BLKR = HSMCI_BLKR_BLKLEN(HSMCI_SD_BLOCKSZ);	//set the block length
-		HSMCI -> HSMCI_BLKR |= HSMCI_BLKR_BCNT(num_blocks);			//program num blocks
-		HSMCI_adtc_start(cmd, startaddr, HSMCI_SD_BLOCKSZ, 1, 1);
-		
-		uint32_t words_to_read = ((HSMCI_SD_BLOCKSZ / 4) * num_blocks);	//128 words per block
-		for (uint16_t word = 0; word < words_to_read; word++) {
-			while (!(HSMCI -> HSMCI_SR & HSMCI_SR_RXRDY));	//wait for new data
-			dest[word] = HSMCI -> HSMCI_RDR;
-		}
-	}
-		
-		
-	return 1;
-}
-
-uint8_t HSMCI_WriteBlock(uint32_t *src, uint32_t startaddr, uint16_t num_blocks, uint8_t DMAtransfer)	//NO-ASF version
-{
-	// check if HSMCI is ready 
-	uint32_t cmd = 0, timeout = 200000;
-	while ( (! ((HSMCI -> HSMCI_SR & HSMCI_SR_CMDRDY) && (HSMCI -> HSMCI_SR & HSMCI_SR_NOTBUSY))) && timeout ) {
-		timeout--;
-	}
-	
-	if (!timeout) {
-		return 0;	
-	}
-	
-	// check if card is ready 
-	timeout = 200000;
-	do {
-		HSMCI_sendCommand(0, SDMMC_MCI_CMD13_SEND_STATUS, (uint32_t)(sd_card_info.relative_addr << 16));
-		if ((HSMCI_getResponse() & CARD_STATUS_READY_FOR_DATA)) {
-			break;
-		}
-		timeout--;
-	} while (timeout);
-	
-	
-	if (!timeout) {
-		return 0;
-	}
-	
-	// send SELECT / DESELECT_CARD command 
-	HSMCI_sendCommand(0, SDMMC_CMD7_SELECT_CARD_CMD, ((uint32_t)(sd_card_info.relative_addr << 16)));	//select card
-
-	// send SET_BLOCKLEN command 
-	HSMCI_sendCommand(0, SDMMC_CMD16_SET_BLOCKLEN, HSMCI_SD_BLOCKSZ);	
-	
-	
-	if (num_blocks > 1) {
-		cmd = SDMMC_CMD25_WRITE_MULTIPLE_BLOCK;
-	} else {
-		cmd = SDMMC_CMD24_WRITE_BLOCK;
-	}
-	
-	// SDHC wants offset in blocks, non-HC wants offset in bytes
-	if (!(sd_card_info.type & CARD_TYPE_HC)) {
-		startaddr *= HSMCI_SD_BLOCKSZ;
-	}
-	
-	if (DMAtransfer) {
-		HSMCI -> HSMCI_DMA = HSMCI_DMA_DMAEN;						// set the DMAEN bit
-		HSMCI -> HSMCI_BLKR = HSMCI_BLKR_BLKLEN(HSMCI_SD_BLOCKSZ);	//set the block length
-		HSMCI_adtc_start(cmd, startaddr, HSMCI_SD_BLOCKSZ, 1, 1);
-		
-		// Configure DMA channel 
-		XDMAC -> XDMAC_GD = (XDMAC_GD_DI(HSMCI_XDMAC_CH));	//disable DMA channel
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CIS;		//read to clear ISR status
-		
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CUBC	= XDMAC_CUBC_UBLEN(HSMCI_SD_BLOCKSZ / 4);	//because TDR = 32 bit = 4x the size of a byte
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CC	= XDMAC_CC_TYPE_PER_TRAN
-														| XDMAC_CC_MBSIZE_SINGLE
-														| XDMAC_CC_DSYNC_MEM2PER
-														| XDMAC_CC_CSIZE_CHK_1
-														| XDMAC_CC_DWIDTH_WORD
-														| XDMAC_CC_SIF_AHB_IF0
-														| XDMAC_CC_DIF_AHB_IF1
-														| XDMAC_CC_SAM_INCREMENTED_AM
-														| XDMAC_CC_DAM_FIXED_AM
-														| XDMAC_CC_PERID(0);
-	
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CSA = (uint32_t)src;
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CDA = (uint32_t)&(HSMCI->HSMCI_FIFO[0]);
-		DMA_enableChannel(HSMCI_XDMAC_CH);
-		
-		while (!(HSMCI -> HSMCI_SR & HSMCI_SR_XFRDONE));
-		
-	} else { //!DMAtransfer
-		HSMCI -> HSMCI_DMA &= ~HSMCI_DMA_DMAEN;						// reset the DMAEN bit
-		HSMCI -> HSMCI_BLKR = HSMCI_BLKR_BLKLEN(HSMCI_SD_BLOCKSZ);	//set the block length
-		HSMCI -> HSMCI_BLKR |= HSMCI_BLKR_BCNT(num_blocks);			//program num blocks
-		HSMCI_adtc_start(cmd, startaddr, HSMCI_SD_BLOCKSZ, 1, 1);
-		
-		uint32_t words_to_write = ((HSMCI_SD_BLOCKSZ / 4) * num_blocks);	//128 words in a block
-		for (uint32_t word = 0; word < words_to_write; word++) {
-			while (!(HSMCI -> HSMCI_SR & HSMCI_SR_TXRDY));	//wait for transmission to become ready
-			HSMCI -> HSMCI_TDR = src[word];
-		}
-	}
-	return 1;
-}
-
-void HSMCI_writeBlocks(const void *src, uint16_t num_blocks)
-{
-	uint32_t datasize = num_blocks * HSMCI_SD_BLOCKSZ;
-	
-	XDMAC -> XDMAC_GD = (XDMAC_GD_DI(HSMCI_XDMAC_CH));	//disable DMA channel
-	
-	if((uint32_t)src & 3) {
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CUBC = datasize;
-		HSMCI->HSMCI_MR |= HSMCI_MR_FBYTE;
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CC	= XDMAC_CC_TYPE_PER_TRAN
-														| XDMAC_CC_MBSIZE_SINGLE
-														| XDMAC_CC_DSYNC_MEM2PER
-														| XDMAC_CC_CSIZE_CHK_1
-														| XDMAC_CC_DWIDTH_BYTE
-														| XDMAC_CC_SIF_AHB_IF0
-														| XDMAC_CC_DIF_AHB_IF1
-														| XDMAC_CC_SAM_INCREMENTED_AM
-														| XDMAC_CC_DAM_FIXED_AM
-														| XDMAC_CC_PERID(0);
-	} else {
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CUBC = datasize / 4;
-		HSMCI->HSMCI_MR &= ~HSMCI_MR_FBYTE;
-		XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CC	= XDMAC_CC_TYPE_PER_TRAN
-														| XDMAC_CC_MBSIZE_SINGLE
-														| XDMAC_CC_DSYNC_MEM2PER
-														| XDMAC_CC_CSIZE_CHK_1
-														| XDMAC_CC_DWIDTH_WORD	
-														| XDMAC_CC_SIF_AHB_IF0
-														| XDMAC_CC_DIF_AHB_IF1
-														| XDMAC_CC_SAM_INCREMENTED_AM
-														| XDMAC_CC_DAM_FIXED_AM
-														| XDMAC_CC_PERID(0);	
-	}
-
-	XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CSA = (uint32_t)src;
-	XDMAC -> XDMAC_CHID[HSMCI_XDMAC_CH].XDMAC_CDA = (uint32_t)&(HSMCI->HSMCI_FIFO[0]);
-	
-	DMA_enableChannel(HSMCI_XDMAC_CH);
-	hsmci_transferPos += datasize;
-}
-
-void sd_mmc_init_readBlocks(uint32_t startaddr, uint16_t num_blocks)
-{
-	uint32_t cmd;
-	
-	//wait for card ready status
-	uint32_t timeout = 200000;
-	do {
-		HSMCI_sendCommand(0, SDMMC_MCI_CMD13_SEND_STATUS, ((uint32_t)(sd_card_info.relative_addr << 16)));
-		if (HSMCI_getResponse() & CARD_STATUS_READY_FOR_DATA) {
-			break;
-		}
-		timeout--;
-	} while (timeout);
-	
-	if (timeout) {	//card ready in time
-		
-		if (num_blocks > 1) {
-			cmd = SDMMC_CMD18_READ_MULTIPLE_BLOCK;
-		} else {
-			cmd = SDMMC_CMD17_READ_SINGLE_BLOCK;
-		}
-		
-		HSMCI_adtc_start(cmd, 0, HSMCI_SD_BLOCKSZ, num_blocks, 1);
-		if (HSMCI_getResponse() & CARD_STATUS_ERR_RD_WR) {
-			//error
-		}
-		
-		sd_mmc_nb_block_remaining = num_blocks;
-		sd_mmc_nb_block_to_tranfer = num_blocks;	
-	}	
-}
-
-void sd_mmc_start_readBlocks(void *dest, uint16_t num_blocks)
-{
-	HSMCI_readBlocks(dest, num_blocks);
-	sd_mmc_nb_block_remaining -= num_blocks;	
-}
-
-void sd_mmc_init_writeBlocks(uint32_t startaddr, uint16_t num_blocks)
-{
-	uint32_t cmd, arg;
-	
-	if (num_blocks > 1) {
-		cmd = SDMMC_CMD25_WRITE_MULTIPLE_BLOCK;
-		} else {
-		cmd = SDMMC_CMD24_WRITE_BLOCK;
+	for (uint32_t i = 0; i < HSMCI_SD_BLOCKSZ * num_blocks_to_write; i++) {
+		printf("%c", blockread[i]);		
 	}	
 	
-	if (sd_card_info.type & CARD_TYPE_HC) {
-		arg = startaddr;
-	} else {
-		arg = (startaddr * HSMCI_SD_BLOCKSZ);
-	}
-	
-	HSMCI_adtc_start(cmd, arg, HSMCI_SD_BLOCKSZ, num_blocks, 1);
-	
-	if (HSMCI_getResponse() & CARD_STATUS_ERR_RD_WR) {
-		USART1 -> US_THR = 'E'; 
-	}
-
-	sd_mmc_nb_block_remaining = num_blocks;
-	sd_mmc_nb_block_to_tranfer = num_blocks;	
+	return 1;
 	
 }
-
-void sd_mmc_start_writeBlocks(const void *src, uint16_t num_blocks)
-{
-	HSMCI_writeBlocks(src, num_blocks);
-	sd_mmc_nb_block_remaining -= num_blocks;
-}
-*/
