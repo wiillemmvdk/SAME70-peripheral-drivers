@@ -15,10 +15,7 @@
 
 #define HSMCI_SD_BLOCKSZ	512
 
+uint8_t HSMCI_RW_Test(void);
 
-uint8_t SD_CardInit(void);
-void test_sd_mem(uint8_t *writebuffer, uint8_t *readbuffer);
-uint8_t SD_writeBlocks(uint32_t *src, uint16_t num_blocks, uint32_t startaddr);
-uint8_t SD_readBlocks(uint32_t *dst, uint16_t num_blocks, uint32_t startaddr);
 
 #endif /* HSMCI_H_ */

@@ -12,10 +12,14 @@
 #include "HSMCI.h"
 #include "XDMAC.h"
 #include "sd_mmc_protocol.h"
+#include "FatFS/ff.h"
+#include "./FatFS/diskio.h"
 
 #include <stdio.h>
 
-#define PRINT_CARD_DEBUG
+static volatile DSTATUS Stat = STA_NOINIT;	//disk status
+
+//#define PRINT_CARD_DEBUG
 
 void HSMCI_Init(void);
 void HSMCI_sendClock(void);
@@ -31,9 +35,10 @@ uint32_t HSMCI_sendCommand(uint32_t cmdr,uint32_t cmd, uint32_t arg);
 uint32_t HSMCI_WaitEndBlockTransfer(void);
 uint8_t HSMCI_sendAppCommand(uint32_t cmd_App, uint32_t arg);
 void HSMCI_adtc_start(uint32_t cmd, uint32_t arg, uint16_t blocksize, uint16_t num_blocks, uint8_t use_DMA);
+uint8_t HSMCI_SD_WaitReady(void);
 
 void HSMCI_readBlocks(void *dest, uint16_t num_blocks);
-void HSMCI_writeBlocks(void *src, uint16_t num_blocks);
+void HSMCI_writeBlocks(const void *src, uint16_t num_blocks);
 
 /* Card data */
 struct {
@@ -311,7 +316,7 @@ uint8_t SD_SetHighSpeed(void)
 	return 1;
 }
 
-uint8_t SD_CardInit(void)
+DSTATUS SD_CardInit(void)
 {	
 	sd_card_info.type = CARD_TYPE_SD;			// assume card is SD
 	sd_card_info.version = CARD_VER_UNKNOWN;	// of unknown version
@@ -339,7 +344,8 @@ uint8_t SD_CardInit(void)
 	sd_card_info.relative_addr = SD_getDeviceAddr();	// ask card for CID number and relative card address 
 	
 	if (sd_card_info.relative_addr == 0) {	//card not responding or none found stop function if true
-		return 0;
+		Stat |= STA_NODISK;
+		return Stat;
 	}
 
 	/* ****************************************************************
@@ -415,8 +421,8 @@ uint8_t SD_CardInit(void)
 // 	}
 	
 #endif	
-		
-	return 1;
+	Stat &= ~STA_NOINIT;	
+	return Stat;
 }
 
 uint32_t HSMCI_WaitEndBlockTransfer(void)
@@ -548,7 +554,7 @@ void HSMCI_readBlocks(void *dest, uint16_t num_blocks)
 		
 }			
 
-void HSMCI_writeBlocks(void *src, uint16_t num_blocks)
+void HSMCI_writeBlocks(const void *src, uint16_t num_blocks)
 {
 	uint32_t datasize = num_blocks * hsmci_blocksize;
 	
@@ -598,7 +604,53 @@ void HSMCI_writeBlocks(void *src, uint16_t num_blocks)
 	
 }
 
-uint8_t SD_readBlocks(void *dst, uint16_t num_blocks, uint32_t startaddr)
+uint8_t HSMCI_SD_WaitReady(void)
+{
+	uint32_t retry = 200000;
+
+	//wait for data ready status
+	do {
+		HSMCI_sendCommand(0, SDMMC_MCI_CMD13_SEND_STATUS, (uint32_t)sd_card_info.relative_addr << 16);
+		if (HSMCI_getResponse() & CARD_STATUS_READY_FOR_DATA) {
+			break;
+		}
+		
+		if (retry-- == 0) {
+			return 0;
+		}
+	} while (1);	
+	
+	return 1;
+}
+
+uint8_t HSMCI_RW_Test(void)
+{
+	uint32_t num_blocks_to_write = 4;
+	char blockwrite[HSMCI_SD_BLOCKSZ * num_blocks_to_write] , blockread[HSMCI_SD_BLOCKSZ * num_blocks_to_write];
+	
+	for (uint32_t i = 0; i < HSMCI_SD_BLOCKSZ * num_blocks_to_write; i++) {
+		blockwrite[i] = 0;
+		blockread[i] = 0;
+	}
+	
+	sprintf(blockwrite, "Hello world!!!\r\n");
+	sprintf(blockwrite + HSMCI_SD_BLOCKSZ, "joepraktischhoi\r\n");
+	sprintf(blockwrite + 2*HSMCI_SD_BLOCKSZ, "Heel praktisch\r\n");
+	sprintf(blockwrite + 3*HSMCI_SD_BLOCKSZ, "meautorbeaut\r\n");
+	
+	SD_writeBlocks(blockwrite, num_blocks_to_write, (312*512));
+	SD_readBlocks(blockread, num_blocks_to_write, (312*512));
+	
+	for (uint32_t i = 0; i < HSMCI_SD_BLOCKSZ * num_blocks_to_write; i++) {
+		printf("%c", blockread[i]);
+	}
+	
+	return 1;
+	
+}
+
+
+DRESULT SD_readBlocks(void *dst, uint16_t num_blocks, uint32_t startaddr)
 {
 	uint32_t cmd, arg;
 	uint32_t retry = 200000;
@@ -611,7 +663,7 @@ uint8_t SD_readBlocks(void *dst, uint16_t num_blocks, uint32_t startaddr)
 		}
 		
 		if (retry-- == 0) {
-			return 0;
+			return RES_ERROR;
 		}
 	} while (1);
 	
@@ -636,25 +688,18 @@ uint8_t SD_readBlocks(void *dst, uint16_t num_blocks, uint32_t startaddr)
 
 	HSMCI_sendCommand(0, SDMMC_CMD12_STOP_TRANSMISSION, 0);
 	
-	return 1;
+	return RES_OK;
 }
 
-uint8_t SD_writeBlocks(void *src, uint16_t num_blocks, uint32_t startaddr)
+DRESULT SD_writeBlocks(const void *src, uint16_t num_blocks, uint32_t startaddr)
 {
 	uint32_t cmd, arg;
-	uint32_t retry = 200000;
 
 	//wait for data ready status
-	do {
-		HSMCI_sendCommand(0, SDMMC_MCI_CMD13_SEND_STATUS, (uint32_t)sd_card_info.relative_addr << 16);
-		if (HSMCI_getResponse() & CARD_STATUS_READY_FOR_DATA) {
-			break;
-		}
+	if (!HSMCI_SD_WaitReady()) {
+		return RES_ERROR;
+	}
 		
-		if (retry-- == 0) {
-			return 0;
-		}
-	} while (1);	
 	
 	if (num_blocks > 1) {
 		cmd = SDMMC_CMD25_WRITE_MULTIPLE_BLOCK;
@@ -678,32 +723,38 @@ uint8_t SD_writeBlocks(void *src, uint16_t num_blocks, uint32_t startaddr)
 	HSMCI_sendCommand(0, SDMMC_CMD12_STOP_TRANSMISSION, 0);
 
 
-	return 1;	
+	return RES_OK;	
 }
 
-
-uint8_t HSMCI_RW_Test(void)
+DRESULT SD_getStatus(void)
 {
-	uint32_t num_blocks_to_write = 4;
-	char blockwrite[HSMCI_SD_BLOCKSZ * num_blocks_to_write] , blockread[HSMCI_SD_BLOCKSZ * num_blocks_to_write];
+	return Stat;
+}
+
+DWORD get_fattime (void)
+{
+	uint32_t timestamp	=	((1998 - 1980) << 25)	//year
+						|	(2 << 21)				//month
+						|	(16 << 16);				//day		
 	
-	for (uint32_t i = 0; i < HSMCI_SD_BLOCKSZ * num_blocks_to_write; i++) {
-		blockwrite[i] = 0;
-		blockread[i] = 0;
-	}
+	return timestamp;
+}
+
+DRESULT SD_IOctl(uint8_t cmd, void *buff)
+{
+	DRESULT res;
+	if (Stat & STA_NOINIT) return RES_NOTRDY;	//no point if card isn't ready
 	
-	sprintf(blockwrite, "Hello world!!!\r\n");
-	sprintf(blockwrite + HSMCI_SD_BLOCKSZ, "joepraktischhoi\r\n");
-	sprintf(blockwrite + 2*HSMCI_SD_BLOCKSZ, "Heel praktisch\r\n");
-	sprintf(blockwrite + 3*HSMCI_SD_BLOCKSZ, "meautorbeaut\r\n");	
+	res = RES_ERROR;
 	
-	SD_writeBlocks(blockwrite, num_blocks_to_write, (312*512));	
-	SD_readBlocks(blockread, num_blocks_to_write, (312*512));
-	
-	for (uint32_t i = 0; i < HSMCI_SD_BLOCKSZ * num_blocks_to_write; i++) {
-		printf("%c", blockread[i]);		
-	}	
-	
-	return 1;
-	
+	switch(cmd) {
+		
+		case CTRL_SYNC:		//make sure all data has been written on the media
+			if (HSMCI_SD_WaitReady()) {
+				res = RES_OK;
+			}
+			break;
+		}
+		
+	return res;
 }
